@@ -1,0 +1,314 @@
+---
+title: "Reddit Comment Analysis"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Setup2, include=FALSE}
+
+require(splitstackshape)
+require(plotrix)
+require(ggplot2)
+require(dplyr)
+require(viridis)
+require(readr)
+require(plotly)
+require(grid)
+require(gridExtra)
+require(tm)
+memory.limit(size=80000)
+
+```
+***
+
+# 1. About Dataset
+
+***
+
+Here we are using a record of around 4.5 million reddit comments published in September 2021. The data consist of four columns, the score (Upvotes - Downvotes), the main body of the text, containing the content of the post, the "topic" and a manually labelled tag, indicating the post belongs to one of 35 categories, ranging from "International", "Teenage" and "Gender" to "Work", "College" and "Nature". Each post relates to only a single tag. The topic column is simply an encoding of the categories.
+
+The score of a comment represents the number of positive votes after subtracting all negative votes. It is important to remember that after a small threshhold of negative votes, comments are then hidden from view unless the user clicks to expand them, and as such we should expect a very extreme bias away from posts with a large number of downvotes.
+
+Data was downloaded from: https://www.kaggle.com/datasets/vaibhavsxn/reddit-comments-labeled-data
+
+Here we will attempt to perform an unsupervised semantic clustering to try and assess if the data's labelling is indicative of the underlying structure of the data. We will be employing a bag of words approach utilising the NLTK python module, as well as others.
+
+```{r Input, include=F}
+
+setwd("C:/Users/laure/Desktop/python/ML/Reddit Comments/")
+commDat <- readr::read_delim("Reddit_Comments.csv", delim = ";")
+
+#
+#groupModel <- aov(lm(score ~ Tag, data = commDat))
+#rm(commDat)
+#gc()
+#groupTukey <- TukeyHSD(groupModel)
+#gc()
+#groupTukey_df <- as.data.frame(groupTukey$Tag)
+#rm(groupModel)
+#rm(groupTukey)
+#save(groupTukey_df, file ="groupTukey.RData")
+#commDat <- readr::read_delim("Reddit_Comments.csv", delim = ";")
+
+```
+
+# 2. Data Overview
+
+We'll take a quick look at some of the main statistics of the overall dataset. Unfortunately, we don't have access to either the poster ID or the time of posting of each comment, which are perhaps the most interesting meta statistics we could apply to the text.
+
+With a total of 4594008 comments, and 35 category tags, we might be hopeful and expect roughly 130,000 comments per category. As we can see below, this is not quite the case, with argument and teenage having 400-500,000 comments and politics having only 4000.
+
+When viewing our comments by score, we may wish to remove comments with a score of 1 - This is the default score when no votes have occurred and generally these posts have gone unnoticed. 
+
+The highest post score observed was just under 6000 and the lowest was -1700. 
+
+```{r Overview1, fig.align='center',fig.width=16,fig.height=8}
+
+table(commDat$Tag)[order(table(commDat$Tag), decreasing = T)]
+
+g1 <- ggplot(commDat, aes(x=score)) + geom_histogram(binwidth = 10) + 
+          theme_minimal() + ggtitle("All Scores")
+
+g2 <- ggplot(commDat[commDat$score > 2 | commDat$score < -2,]) + geom_histogram(aes(fill=Tag, x = score),bins = 35) + 
+            theme_minimal() + ggtitle("Scores above 2 or below -2 (Zoom)") + xlim(-40,175) + scale_fill_viridis(discrete = TRUE, direction = -1) + 
+            theme(legend.position="None")
+
+suppressWarnings(grid.arrange(g1,g2, ncol = 2))
+
+```
+<br>
+
+Examinng all scores together shows us that while we might have a wide total range, the vast majority of scores lie at roughly -1 to 1, generating very little activity. Around 40% of our comments have a score of 1 (The default, having generated no activity). Zooming in and ignoring scores within the range -2:2, we see that the majority of remaining scores lie above 0, around 5-10, with scores in the 2-5 range being slightly less frequent.
+
+If we examine score ordered by topic, we might see a difference in the overall distribution of scores. Because we have so many tags, this may require splitting up the graph somewhat. As such, we'll try to only visualize tags that we pre-suppose will have different score means. In order to do this, we perform an analysis of variance followed by a post-hoc Tukey test to search for significant differences. We will then examine more closely those tags which are separated by the largest absolute diff (And are significant).
+
+Because our sample sizes for each group are so large, (Above 100,000), it is not realistically feasible to measure normality as these tests do not perform at high N. We will assume via the CLT that parametric tests are appropriate for such large samples.  
+
+```{r loadTukey}
+
+load("groupTukey.RData")
+groupTukey_df <- groupTukey_df[order(abs(groupTukey_df$diff), decreasing = T),]
+
+head(groupTukey_df, 9)
+group_diff <- head(groupTukey_df, 9)
+
+```
+
+We see that Teenage seems to have a substantially different mean than the average category. We also see an interesting diff between Nature and Hardware. Suprisingly, we might have expected Arguments to feature here, but they are missing from the top of the list. Let's examine a couple of these comparisons.
+
+```{r Overview3, echo=F}
+
+tag_Groups <- as.data.frame(unique(commDat$Tag))
+
+tag_Groups$TagGroup <- c("Society","Society","Society","Hobby","Education/Work","Society","Health/Fitness","Hobby","Misc","Health/Fitness","Entertainment",
+                         "Entertainment", "Education/Work", "Misc", "Hobby", "Society", "Hobby", "Entertainment", "Misc", "Misc", "Society","Entertainment",
+                         "Hobby", "Technology", "Entertainment", "Hobby", "Education/Work", "Misc", "Technology", "Health/Fitness", "Misc", "Misc", "Education/Work",
+                         "Technology","Society")
+colnames(tag_Groups)[1] <- "Tag"
+
+commDat <- merge(commDat,tag_Groups,by="Tag")
+
+```
+
+```{r Overview4,echo=F}
+
+commDat_diff <- commDat[commDat$Tag %in% unique(unlist(strsplit(rownames(group_diff),"-"))),]
+
+g1 <- ggplot(commDat_diff[commDat_diff$Tag %in% c("Teenage","Conversation"),]) + geom_density(aes(x=score,colour=Tag,fill=Tag,group=Tag), alpha=0.45, adjust = 4) + 
+        xlim(-10,25) + ggtitle("Teenage vs Conversation") +
+        theme_minimal() + theme(legend.position = "bottom") + ylim(c(0,0.63))
+
+g2 <- ggplot(commDat_diff[commDat_diff$Tag %in% c("Teenage","Politics"),]) + geom_density(aes(x=score,colour=Tag,fill=Tag,group=Tag), alpha=0.45, adjust = 4) + 
+        xlim(-10,25) + ggtitle("Teenage vs Politics") +
+        theme_minimal() + theme(legend.position = "bottom") + ylim(c(0,0.63))
+
+g3 <- ggplot(commDat_diff[commDat_diff$Tag %in% c("Nature","Conversation"),]) + geom_density(aes(x=score,colour=Tag,fill=Tag,group=Tag), alpha=0.45, adjust = 4) + 
+        xlim(-10,25) + ggtitle("Nature vs Conversation") +
+        theme_minimal() + theme(legend.position = "bottom") + ylim(c(0,0.63))
+
+g4 <- ggplot(commDat_diff[commDat_diff$Tag %in% c("Nature","Hardware"),]) + geom_density(aes(x=score,colour=Tag,fill=Tag,group=Tag), alpha=0.45, adjust = 4) + 
+        xlim(-10,25) + ggtitle("Nature vs Hardware") +
+        theme_minimal() + theme(legend.position = "bottom") + ylim(c(0,0.63))
+
+
+suppressWarnings(grid.arrange(g1,g2,g3,g4,ncol=2))
+
+
+```
+<br>
+
+Interesting! We do see slightly different distributions for different topics. Here, we see that the topics "Teenager" and "Nature" consistently receive a score further from the default, 1, whereas topics like Conversation and Hardware consistently receive more default scores of 1. From this we might suppose that posts under the teenager and nature categories are much more likely to generate activity and be responded to/voted on. If we quickly examine the total mean score of each tag, alongside the standard error, we get a good idea about the popularity of each tag:
+
+
+```{r Overview_Boxplot}
+
+commDat_agg <- aggregate(score~Tag,commDat,mean)
+commDat_sd <- aggregate(score~Tag,commDat, FUN = function(x) std.error(x))
+colnames(commDat_agg) <- c("Tag","score_mean")
+colnames(commDat_sd) <- c("Tag","score_sem")
+
+commDat_agg2 <- merge(commDat_agg,commDat_sd,by="Tag")
+
+commDat_agg2$Tag <- factor(commDat_agg2$Tag, levels = commDat_agg2[order(commDat_agg2$score_mean, decreasing = T),]$Tag)
+
+ggplot(commDat_agg2, aes(x=Tag,y=score_mean, colour=Tag)) + geom_point(size=2.5) + geom_errorbar(aes(ymin=score_mean-score_sem,ymax=score_mean+score_sem)) + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 50, vjust = 0.5, hjust=1), legend.position = "None")
+
+```
+<br>
+
+Wow! For such a large category, Teenage having the highest mean score is certainly interesting - Both the most active category in terms of posts, and in terms of generative upvote activity. Nature, Gender and Media are perhaps more expected as highly upvoted topics. Interestingly, Conversation, Hardware and Politics have a very low mean upvote score - Perhaps this makes sense, as these topics might be considered slightly "boring".
+
+# 3. Unsupervised clustering
+
+Now, we already have 35 categories, but some of these categories may be very close to eachother in terms of content and have an unnecessary separation. One technique we could use to decypher this would be to employ an unsupervised clustering technique on the body of the text of each post - A semantic clustering. We might expect that the difference between "Music" and "Media" may be largely superficial, and in semantic context, these posts are generally very similar. We may see that "Teenage" clusters into several sub-clusters which we may need to further delineate. 
+
+Our first step is to clean the text body. For example, removing links and URLs, etc. We will also have to subsample the data due to the fact that calculating a distance matrix with 4.5 million rows is not feasible. We will do this in a stratified manner in order to preserve the different tag frequencies.
+
+After this, we will perform further text cleaning, such as the removal of punctuation, stop words and white spaces using NLTK. We will also be removing words that have a very low frequency because, with such a large number of comments, it's very important to reduce our feature space to something our computer power can handle. 
+
+Our aim is to generate a matrix from our clean corpus of vectorised and TF-IDF adjusted posts that we can then submit to clustering.
+
+This will be performed in python for convenience, as below.
+
+```{r Semantic Clustering, include=F}
+
+commDat_sub <- stratified(commDat, "Tag", size = 0.1)
+
+write.csv(commDat_sub, file="Comments_Sub.csv",fileEncoding="UTF-8")
+
+
+```
+
+```{r Python1, eval=F}
+
+allDat = pd.read_csv("Comments_Sub.csv")
+labels = allDat["Tag"]
+#Remove URLS and whitespace
+allDat['body'] = allDat['body'].str.strip()
+allDat['body'] = allDat['body'].str.replace('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', ' ',regex=True)
+
+#Inititate vectorizer
+cv = TfidfVectorizer(lowercase=True,
+                         stop_words='english',
+                         ngram_range=(1, 1),
+                         tokenizer=word_tokenize, max_df = 0.975, min_df = 0.01)
+X = cv.fit_transform(allDat["body"])
+
+#Perform dimensionality reduction and normalize
+svd = TruncatedSVD()
+normalizer = Normalizer(copy=False)
+lsa = make_pipeline(svd, normalizer)
+X = lsa.fit_transform(X)
+
+#Perform clustering
+km = KMeans(max_iter=100, n_init=10)
+km.fit(X)
+
+X_out = pd.DataFrame(X)
+X_out["label_old"] = labels
+X_out["labels_new"] = km.labels_
+X_out.to_csv("KMeans.csv")
+
+
+```
+
+Running this over our input comment data, we arrive at 8 cluster assignments. Quite different from our 35 starting Tags. Indeed, cluster overlap metrics indicate how different these two groupings are, with a homogeneity of 0.05 and an adjusted RAND index of 0.024 - They couldn't be more different. 
+
+To visualise this, we might struggle to plot each of the 450,000 comments after dimensionlity reduction, but we can attempt to plot the centroids of the old 35 clusters versus the centroids of the new 8 clusters.
+
+## Kmeans plots
+
+```{r KMeans input}
+
+kmeans_dat <- read.csv("KMeans.csv")
+colnames(kmeans_dat) <- c("Index","X","Y","old_labels","new_labels")
+
+centroids_old <- aggregate(kmeans_dat[,c(2,3)],by = list(kmeans_dat$old_labels),mean)
+centroids_new <- aggregate(kmeans_dat[,c(2,3)],by = list(kmeans_dat$new_labels),mean)
+centroids_old$Set <- "Old"
+centroids_new$Set <- "New"
+centroids_all <- rbind(centroids_old,centroids_new)
+
+ggplot(centroids_all, aes(x=X,y=Y,colour=Group.1,shape=Set)) +
+  geom_point() + ggrepel::geom_text_repel(aes(label=Group.1)) +
+  facet_wrap(~Set, nrow = 1) +
+        theme_minimal() + theme(legend.position = "bottom")
+
+
+```
+<br>
+
+Interesting! Our k-means clustered centroids do certainly seem more well distributed over the data. Further, we seem to have identified a cluster of very outlying comments, cluster 3. Let's try and figure out what cluster 0 may represent.
+
+```{r Clus3}
+
+table(kmeans_dat[kmeans_dat$new_labels==3,]$old_labels)
+
+```
+
+## Cluster Analysis
+
+In terms of our old labels, cluster0 is well distributed, however "Media", "Stats" and "Images" are featured here much more heavily here than we might expect. This is actually a little surprising, as the centroids for these tags do not appear to be close to cluster 4, which is suggestive that the Tags themselves may not faithfully represent all of the dimensions captured by the body of the text. The other clusters are similarly distributed to the original labels, with cluster 0 being by far the largest cluster (Roughly 50% of comments are members of this cluster), and also being located very close to the highest density of tag centroids.
+
+```{r Clus3-2}
+
+print("Cluster 3")
+
+allDat_processed <- readr::read_csv("allDat_Sub_test.csv")
+
+clus3_corpus <- tm::VCorpus(VectorSource(allDat_processed[allDat_processed$labels_new==3,]$body))
+clus3_freq <- as.data.frame(termFreq(allDat_processed[allDat_processed$labels_new==3,]$body))
+
+rownames(clus3_freq)[c(10:20)]
+
+```
+
+Wow! This is actually incredibly interesting. These long, apparently nonsense, strings are, in fact, scams. Designed to not appear as links to users of reddit mobile, these also managed to bypass our link-removing regex term. Discovering these posts manually, or attempting to design a regex to find them, would have been a great challenge, but our k-means clustering has identified them as outliers very effectively and quarantined them off to one side of our plot, something that the manual labelling completely missed. Clicking on these links will take reddit users to sites which contain malware, and their discovery is a useful proof of methodology for clustering these comments.
+
+<br>
+
+When looking at our other cluster centroids, we might expect that cluster 7 would be associated with the top-left group of Tags: Images, Info, Comments and Politic. Just for the purpose of exploring these clusters, we'll remove the terms most frequent in the overall body of text and remove them, analogous to our python script.
+
+```{r Other Clusters - 7}
+
+print("Cluster 7")
+
+clus7_corpus <- tm::VCorpus(VectorSource(allDat_processed[allDat_processed$labels_new==7,]$body))
+clus7_freq <- as.data.frame(termFreq(allDat_processed[allDat_processed$labels_new==7,]$body))
+clus7_freq$term <- rownames(clus7_freq)
+colnames(clus7_freq)[1] <- "freq"
+
+clus7_freq <- clus7_freq[order(clus7_freq$freq, decreasing = T),]
+
+clus7_freq[c(30:40),]
+
+```
+Well, when examining this data from the overall data, the term that stands out the most, by far, is that of the 2812 references to "NSFW", 2568 were in cluster 7. "NSFW" meaning not safe for work, generally references 18+ images. Why these are clustered with Info and Politics is unclear, but considering how small both of these categories were initially, it is possible that the majority of comments within them were mislabeled. Other high-frequency cluster7 terms include "Newegg", "Amazon" and "SuperBiiz", two online computer-parts stores, which are reflected by the relatively high frequency of "Hardware" tags also present in cluster7. Why NSFW and buying computer parts cluster together is a little unclear!
+
+<br>
+
+```{r Other Clusters - 6}
+
+print("Cluster 5")
+
+table(allDat_processed[allDat_processed$labels_new==5,]$labels_test)
+
+clus5_corpus <- tm::VCorpus(VectorSource(allDat_processed[allDat_processed$labels_new==5,]$body))
+clus5_freq <- as.data.frame(termFreq(allDat_processed[allDat_processed$labels_new==5,]$body))
+
+clus5_freq$term <- rownames(clus5_freq)
+colnames(clus5_freq)[1] <- "freq"
+clus5_freq <- clus5_freq[order(clus5_freq$freq, decreasing = T),]
+
+clus5_freq[c(30:40),]
+
+
+```
+Hmmm... Very hard to tell. Certainly the smaller clusters seem to have quite a well defined theme, but the larger clusters are harder to decypher. One issue here is likely to be our dimensionality reduction and transformation technique, which could likely afford to be more sophisticated.
